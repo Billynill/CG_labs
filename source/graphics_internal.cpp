@@ -13,8 +13,18 @@
 #pragma warning(push)
 #pragma warning(disable: 4100 4189 4324)
 #endif // _MSC_VER
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#pragma clang diagnostic ignored "-Wunused-private-field"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wunused-variable"
+#endif
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif // _MSC_VER
@@ -786,8 +796,8 @@ void submitAndPresent() {
 	    result == VK_SUBOPTIMAL_KHR ||
 	    vk_swapchain_resize_require) {
 		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
-	} else {
-		std::cerr << "Failed to present Vulkan swapchain image\n";
+	} else if (result != VK_SUCCESS) {
+		std::cerr << "Failed to present Vulkan swapchain image: " << result << '\n';
 	}
 }
 
