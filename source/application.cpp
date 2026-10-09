@@ -4,6 +4,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -15,6 +16,8 @@
 namespace {
 
 constexpr float pi = 3.1415926535f;
+// пункт 6: рисуем два объекта, каждому нужен свой набор дескрипторов
+constexpr std::size_t object_count = 2;
 
 struct Mat4 {
 	float value[16]{};
@@ -22,31 +25,43 @@ struct Mat4 {
 
 struct alignas(16) UniformData {
 	Mat4 mvp;
-	float base_color[4];
+	float base_color[4]; //пункт 4 цвета
 };
 
 VkShaderModule vertex_shader = VK_NULL_HANDLE;
 VkShaderModule fragment_shader = VK_NULL_HANDLE;
 VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
 VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
-VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+std::array<VkDescriptorSet, object_count> descriptor_sets{};
 VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
 VkPipeline graphics_pipeline = VK_NULL_HANDLE;
 
 VkBuffer vertex_buffer = VK_NULL_HANDLE;
 VkBuffer index_buffer = VK_NULL_HANDLE;
-VkBuffer uniform_buffer = VK_NULL_HANDLE;
+std::array<VkBuffer, object_count> uniform_buffers{};
 VmaAllocation vertex_allocation = VK_NULL_HANDLE;
 VmaAllocation index_allocation = VK_NULL_HANDLE;
-VmaAllocation uniform_allocation = VK_NULL_HANDLE;
-void* uniform_mapped = nullptr;
+std::array<VmaAllocation, object_count> uniform_allocations{};
+std::array<void*, object_count> uniform_mapped{};
 
 //пункт 1, проекция 0-преспектива, 1- ортографическая
 int projection_mode = 0;
-float object_position[3] = { 0.0f, 0.0f, 0.0f };
-float object_rotation[3] = { 20.0f, 30.0f, 0.0f };
-float object_scale[3] = { 1.0f, 1.0f, 1.0f };
-float base_color[4] = { 1.0f, 0.8f, 0.8f, 1.0f };
+float object_position[object_count][3] = {
+	{ -0.75f, 0.0f, 0.0f },
+	{  0.75f, 0.0f, 0.0f },
+};
+float object_rotation[object_count][3] = {
+	{ 20.0f, 30.0f, 0.0f },
+	{ -15.0f, 20.0f, 0.0f },
+};
+float object_scale[object_count][3] = {
+	{ 0.75f, 0.75f, 0.75f },
+	{ 0.75f, 0.75f, 0.75f },
+};
+float base_color[object_count][4] = {
+	{ 1.0f, 0.8f, 0.8f, 1.0f },
+	{ 0.65f, 0.8f, 1.0f, 1.0f },
+}; //пункт 4 цвета
 
 //пункт 3 анимации
 bool animation_playing = true;
@@ -224,10 +239,12 @@ bool createGeometryBuffers() {
 		std::cerr << "Failed to create index buffer\n";
 		return false;
 	}
-	if (!createBuffer(sizeof(UniformData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-		nullptr, uniform_buffer, uniform_allocation, &uniform_mapped)) {
-		std::cerr << "Failed to create uniform buffer\n";
-		return false;
+	for (std::size_t i = 0; i < object_count; ++i) {
+		if (!createBuffer(sizeof(UniformData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			nullptr, uniform_buffers[i], uniform_allocations[i], &uniform_mapped[i])) {
+			std::cerr << "Failed to create uniform buffer for object #" << i << '\n';
+			return false;
+		}
 	}
 	return true;
 }
@@ -252,11 +269,11 @@ bool createDescriptors() {
 	}
 	const VkDescriptorPoolSize pool_size = {
 		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.descriptorCount = 1,
+		.descriptorCount = static_cast<std::uint32_t>(object_count),
 	};
 	const VkDescriptorPoolCreateInfo pool_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1,
+		.maxSets = static_cast<std::uint32_t>(object_count),
 		.poolSizeCount = 1,
 		.pPoolSizes = &pool_size,
 	};
@@ -265,31 +282,35 @@ bool createDescriptors() {
 		std::cerr << "Failed to create descriptor pool\n";
 		return false;
 	}
+	std::array<VkDescriptorSetLayout, object_count> layouts{};
+	layouts.fill(descriptor_set_layout);
 	const VkDescriptorSetAllocateInfo allocate_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 		.descriptorPool = descriptor_pool,
-		.descriptorSetCount = 1,
-		.pSetLayouts = &descriptor_set_layout,
+		.descriptorSetCount = static_cast<std::uint32_t>(object_count),
+		.pSetLayouts = layouts.data(),
 	};
 	if (vkAllocateDescriptorSets(context.device, &allocate_info,
-		&descriptor_set) != VK_SUCCESS) {
-		std::cerr << "Failed to allocate descriptor set\n";
+		descriptor_sets.data()) != VK_SUCCESS) {
+		std::cerr << "Failed to allocate descriptor sets\n";
 		return false;
 	}
-	const VkDescriptorBufferInfo buffer_info = {
-		.buffer = uniform_buffer,
-		.offset = 0,
-		.range = sizeof(UniformData),
-	};
-	const VkWriteDescriptorSet write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = descriptor_set,
-		.dstBinding = 0,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.pBufferInfo = &buffer_info,
-	};
-	vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+	for (std::size_t i = 0; i < object_count; ++i) {
+		const VkDescriptorBufferInfo buffer_info = {
+			.buffer = uniform_buffers[i],
+			.offset = 0,
+			.range = sizeof(UniformData),
+		};
+		const VkWriteDescriptorSet write = {
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = descriptor_sets[i],
+			.dstBinding = 0,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.pBufferInfo = &buffer_info,
+		};
+		vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+	}
 	return true;
 }
 
@@ -408,11 +429,13 @@ void destroyResources() {
 		vkDestroyDescriptorSetLayout(context.device, descriptor_set_layout, nullptr);
 		descriptor_set_layout = VK_NULL_HANDLE;
 	}
-	if (uniform_buffer != VK_NULL_HANDLE) {
-		vmaDestroyBuffer(context.allocator, uniform_buffer, uniform_allocation);
-		uniform_buffer = VK_NULL_HANDLE;
-		uniform_allocation = VK_NULL_HANDLE;
-		uniform_mapped = nullptr;
+	for (std::size_t i = 0; i < object_count; ++i) {
+		if (uniform_buffers[i] != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(context.allocator, uniform_buffers[i], uniform_allocations[i]);
+			uniform_buffers[i] = VK_NULL_HANDLE;
+			uniform_allocations[i] = VK_NULL_HANDLE;
+			uniform_mapped[i] = nullptr;
+		}
 	}
 	if (index_buffer != VK_NULL_HANDLE) {
 		vmaDestroyBuffer(context.allocator, index_buffer, index_allocation);
@@ -434,7 +457,7 @@ void destroyResources() {
 	}
 }
 
-void updateUniformBuffer() {
+void updateUniformBuffer(std::size_t object_index) {
 	auto& context = graphics::internal::context;
 	const float width = static_cast<float>(std::max(context.swapchain_extent.width, 1u));
 	const float height = static_cast<float>(std::max(context.swapchain_extent.height, 1u));
@@ -444,20 +467,22 @@ void updateUniformBuffer() {
 	float animated_z = 0.0f;
 	float animated_rotation = 0.0f;
 	if (animation_playing || animation_time != 0.0f) {
-		animated_x = trajectory_radius * std::sin(animation_time);
-		animated_y = trajectory_height * std::cos(animation_time * 3.0f);
-		animated_z = trajectory_radius * 0.45f * std::sin(animation_time * 2.0f);
-		animated_rotation = animation_time * 45.0f;
+		const float phase = animation_time + static_cast<float>(object_index) * pi;
+		animated_x = trajectory_radius * std::sin(phase);
+		animated_y = trajectory_height * std::cos(phase * 3.0f);
+		animated_z = trajectory_radius * 0.45f * std::sin(phase * 2.0f);
+		animated_rotation = phase * 45.0f;
 	}
-	const float rx = (object_rotation[0] + animated_rotation * 0.35f) * pi / 180.0f;
-	const float ry = (object_rotation[1] + animated_rotation) * pi / 180.0f;
-	const float rz = object_rotation[2] * pi / 180.0f;
+	const float rx = (object_rotation[object_index][0] + animated_rotation * 0.35f) * pi / 180.0f;
+	const float ry = (object_rotation[object_index][1] + animated_rotation) * pi / 180.0f;
+	const float rz = object_rotation[object_index][2] * pi / 180.0f;
 	Mat4 model = multiply(
-		translationMatrix(object_position[0] + animated_x,
-			object_position[1] + animated_y, object_position[2] + animated_z),
+		translationMatrix(object_position[object_index][0] + animated_x,
+			object_position[object_index][1] + animated_y,
+			object_position[object_index][2] + animated_z),
 		multiply(rotationZMatrix(rz), multiply(rotationYMatrix(ry),
-			multiply(rotationXMatrix(rx), scaleMatrix(object_scale[0],
-				object_scale[1], object_scale[2]))))
+			multiply(rotationXMatrix(rx), scaleMatrix(object_scale[object_index][0],
+				object_scale[object_index][1], object_scale[object_index][2]))))
 	);
 	const Mat4 view = translationMatrix(0.0f, 0.0f, -3.0f);
 	const Mat4 projection = projection_mode == 0
@@ -465,9 +490,9 @@ void updateUniformBuffer() {
 		: orthographicMatrix(aspect, 0.1f, 100.0f);
 	UniformData data{};
 	data.mvp = multiply(projection, multiply(view, model));
-	std::memcpy(data.base_color, base_color, sizeof(base_color));
-	std::memcpy(uniform_mapped, &data, sizeof(data));
-	vmaFlushAllocation(context.allocator, uniform_allocation, 0, sizeof(data));
+	std::memcpy(data.base_color, base_color[object_index], sizeof(data.base_color));
+	std::memcpy(uniform_mapped[object_index], &data, sizeof(data));
+	vmaFlushAllocation(context.allocator, uniform_allocations[object_index], 0, sizeof(data));
 }
 
 } // namespace
@@ -511,12 +536,18 @@ void update(double time) {
 	ImGui::Begin("Lab 1 - Cube");
 	const char* projection_names[] = { "Perspective", "Orthographic" }; //пункт 1. проекции интерфейс
 	ImGui::Combo("Projection", &projection_mode, projection_names, 2); //пункт 2 UI
-	ImGui::DragFloat3("Position", object_position, 0.02f);
-	ImGui::DragFloat3("Rotation", object_rotation, 1.0f);
-	ImGui::SliderFloat3("Scale", object_scale, 0.1f, 3.0f);
-	ImGui::ColorEdit4("Base color", base_color);
+	const char* object_names[] = { "Cube 1", "Cube 2" };
+	for (std::size_t i = 0; i < object_count; ++i) {
+		ImGui::PushID(static_cast<int>(i));
+		ImGui::SeparatorText(object_names[i]);
+		ImGui::DragFloat3("Position", object_position[i], 0.02f);
+		ImGui::DragFloat3("Rotation", object_rotation[i], 1.0f);
+		ImGui::SliderFloat3("Scale", object_scale[i], 0.1f, 3.0f);
+		ImGui::ColorEdit4("Base color", base_color[i]);
+		ImGui::PopID();
+	}
 	ImGui::SeparatorText("Animation");
-	if (ImGui::Button(animation_playing ? "Pause" : "Play")) {
+	if (ImGui::Button(animation_playing ? "Pause" : "Play")) {  //управление анимацией пункт 3
 		animation_playing = !animation_playing;
 	}
 	ImGui::SameLine();
@@ -532,7 +563,9 @@ void update(double time) {
 
 void render(const graphics::internal::FrameData& fd) {
 	auto& context = graphics::internal::context;
-	updateUniformBuffer();
+	for (std::size_t i = 0; i < object_count; ++i) {
+		updateUniformBuffer(i);
+	}
 	vkResetCommandBuffer(fd.command_buffer, 0);
 	const VkCommandBufferBeginInfo begin_info = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -562,13 +595,16 @@ void render(const graphics::internal::FrameData& fd) {
 	vkCmdSetViewport(fd.command_buffer, 0, 1, &viewport);
 	vkCmdSetScissor(fd.command_buffer, 0, 1, &scissor);
 	vkCmdBindPipeline(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
-	vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
 	const VkDeviceSize offset = 0;
 	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vertex_buffer, &offset);
 	vkCmdBindIndexBuffer(fd.command_buffer, index_buffer, 0, VK_INDEX_TYPE_UINT32);
-	vkCmdDrawIndexed(fd.command_buffer,
-		static_cast<std::uint32_t>(cube::indices.size()), 1, 0, 0, 0);
+	// Геометрия общая, но перед каждым draw подключается descriptor set своего куба.
+	for (std::size_t i = 0; i < object_count; ++i) {
+		vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline_layout, 0, 1, &descriptor_sets[i], 0, nullptr);
+		vkCmdDrawIndexed(fd.command_buffer,
+			static_cast<std::uint32_t>(cube::indices.size()), 1, 0, 0, 0);
+	}
 	vkCmdEndRenderPass(fd.command_buffer);
 	vkEndCommandBuffer(fd.command_buffer);
 }

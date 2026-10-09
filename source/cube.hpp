@@ -9,7 +9,7 @@ namespace cube {
         float color[3];
     };
 
-    inline constexpr std::array<Vertex, 8> vertices = {{
+    inline constexpr std::array<Vertex, 8> vertices = {{ //пункт 5 управление цветами
         {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}},
         {{ 0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
         {{ 0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.0f}},
