@@ -2,31 +2,62 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
+
+#include "math.hpp"
 
 namespace cube {
-    struct Vertex {
-        float position[3];
-        float color[3];
-    };
 
-    inline constexpr std::array<Vertex, 8> vertices = {{ //пункт 5 управление цветами
-        {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, 0.0f}},
-        {{ 0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-        {{ 0.5f,  0.5f, -0.5f}, {1.0f, 1.0f, 0.0f}},
-        {{-0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+struct Vertex {
+	math::Vec3 position;
+	math::Vec3 normal;
+};
 
-        {{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},
-        {{ 0.5f, -0.5f,  0.5f}, {1.0f, 0.0f, 1.0f}},
-        {{ 0.5f,  0.5f,  0.5f}, {1.0f, 1.0f, 1.0f}},
-        {{-0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 1.0f}},
-    }};
+struct Mesh {
+	std::vector<Vertex> vertices;
+	std::vector<std::uint32_t> indices;
+};
 
-    inline constexpr std::array<std::uint32_t, 36> indices = {{
-        0, 3, 2,  2, 1, 0, // задняя грань
-        4, 5, 6,  6, 7, 4, // передняя грань
-        0, 4, 7,  7, 3, 0, // левая грань
-        1, 2, 6,  6, 5, 1, // правая грань
-        0, 1, 5,  5, 4, 0, // нижняя грань
-        3, 7, 6,  6, 2, 3, // верхняя грань
-    }};
-} // namespace cube;
+// Нормали генерируются процедурно: для каждой грани берём векторное
+// произведение двух её рёбер. Угол куба принадлежит трём граням с разными
+// нормалями, поэтому вершины дублируются: 6 граней * 4 вершины = 24 вершины.
+inline Mesh createMesh() {
+	const std::array<math::Vec3, 8> corners = {{
+		{ -0.5f, -0.5f, -0.5f }, {  0.5f, -0.5f, -0.5f },
+		{  0.5f,  0.5f, -0.5f }, { -0.5f,  0.5f, -0.5f },
+		{ -0.5f, -0.5f,  0.5f }, {  0.5f, -0.5f,  0.5f },
+		{  0.5f,  0.5f,  0.5f }, { -0.5f,  0.5f,  0.5f },
+	}};
+
+	// Вершины каждой грани перечислены против часовой стрелки,
+	// если смотреть на грань снаружи, поэтому нормаль смотрит наружу.
+	const std::array<std::array<std::uint32_t, 4>, 6> faces = {{
+		{{ 0, 3, 2, 1 }}, // задняя  (-Z)
+		{{ 4, 5, 6, 7 }}, // передняя (+Z)
+		{{ 0, 4, 7, 3 }}, // левая   (-X)
+		{{ 1, 2, 6, 5 }}, // правая  (+X)
+		{{ 0, 1, 5, 4 }}, // нижняя  (-Y)
+		{{ 3, 7, 6, 2 }}, // верхняя (+Y)
+	}};
+
+	Mesh mesh;
+	for (const auto& face : faces) {
+		const math::Vec3 a = corners[face[0]];
+		const math::Vec3 b = corners[face[1]];
+		const math::Vec3 c = corners[face[2]];
+		const math::Vec3 normal = math::normalize(math::cross(b - a, c - a));
+
+		const auto first = static_cast<std::uint32_t>(mesh.vertices.size());
+		for (std::uint32_t corner : face) {
+			mesh.vertices.push_back({ corners[corner], normal });
+		}
+		// Две треугольные половинки квадратной грани.
+		mesh.indices.insert(mesh.indices.end(), {
+			first, first + 1, first + 2,
+			first + 2, first + 3, first,
+		});
+	}
+	return mesh;
+}
+
+} // namespace cube

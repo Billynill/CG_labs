@@ -64,3 +64,16 @@ because relative paths are used.
 `CMakeLists.txt` has a build recipe for compiling shader files
 along with an application. Look for a comment in this file to see
 how to compile your shaders.
+
+## Laboratory work 2: camera and lighting
+
+Scene: floor, back wall and two cubes (normals are generated procedurally in `source/cube.hpp`).
+
+- **Camera**: position, yaw/pitch, FOV in the UI; `RMB + mouse` to look around, `WASD`/`QE` to move, `Shift` to speed up.
+- **Lighting**: Blinn-Phong in `shaders/lit.frag` with ambient light, one directional light,
+  an array of point lights and an array of spot lights (inverse-square falloff, soft edges between the inner and outer angles).
+- **Descriptor sets**: set 0 holds the scene uniform buffer plus two storage buffers with lights
+  (unsized arrays in the shader; buffers grow automatically when lights are added), set 1 holds the model matrix and material.
+- **UI**: add/remove point and spot lights, edit every parameter, edit materials (albedo, specular color, shininess).
+- **Light visualization**: unlit cubes in the light color and white wireframe cones for spot lights (`shaders/unlit.*`), toggled in the UI.
+- Extras: orbiting point lights, a spinning cube, and a spot light that can be attached to the camera as a flashlight.
