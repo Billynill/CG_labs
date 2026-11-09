@@ -44,8 +44,6 @@ void drawGlobalLightSection(scene::State& state) {
 	ImGui::PopID();
 }
 
-// Общая логика списков источников: заголовок, кнопка "Add", узел дерева
-// на каждый источник с кнопкой "Remove". Поля конкретного типа рисует draw_fields.
 template <typename Light, typename CreateFn, typename DrawFieldsFn>
 void drawLightList(const char* header, const char* item_name, std::vector<Light>& lights,
                    CreateFn create_light, DrawFieldsFn draw_fields) {
@@ -57,7 +55,7 @@ void drawLightList(const char* header, const char* item_name, std::vector<Light>
 		lights.push_back(create_light());
 	}
 
-	std::size_t remove_index = lights.size(); // "ничего не удалять"
+	std::size_t remove_index = lights.size();
 	for (std::size_t i = 0; i < lights.size(); ++i) {
 		ImGui::PushID(static_cast<int>(i));
 		if (ImGui::TreeNode("light", "%s #%zu", item_name, i)) {
@@ -69,7 +67,6 @@ void drawLightList(const char* header, const char* item_name, std::vector<Light>
 		}
 		ImGui::PopID();
 	}
-	// Удаляем после цикла, чтобы не ломать итерацию.
 	if (remove_index < lights.size()) {
 		lights.erase(lights.begin() + static_cast<std::ptrdiff_t>(remove_index));
 	}
@@ -80,7 +77,6 @@ void drawPointLightsSection(scene::State& state) {
 	const Camera& camera = state.camera;
 	drawLightList("Point lights", "Point light", state.point_lights,
 		[&] {
-			// Новый источник появляется перед камерой, чтобы его сразу было видно.
 			return scene::PointLight{ .position = camera.position + camera.forward() * 2.0f };
 		},
 		[](scene::PointLight& light) {
@@ -110,28 +106,51 @@ void drawSpotLightsSection(scene::State& state) {
 			ImGui::SliderFloat("Intensity", &light.intensity, 0.0f, 50.0f);
 			ImGui::SliderFloat("Inner angle", &light.inner_angle, 1.0f, 89.0f, "%.1f deg");
 			ImGui::SliderFloat("Outer angle", &light.outer_angle, 1.0f, 89.0f, "%.1f deg");
-			// Внешний угол не может быть меньше внутреннего.
 			light.outer_angle = std::max(light.outer_angle, light.inner_angle);
 		});
 }
 
+void drawTextureSetCombo(int& texture_set) {
+	if (!ImGui::BeginCombo("Texture", scene::texture_sets[static_cast<std::size_t>(texture_set)].name)) {
+		return;
+	}
+	for (int i = 0; i < static_cast<int>(scene::texture_sets.size()); ++i) {
+		const bool selected = i == texture_set;
+		if (ImGui::Selectable(scene::texture_sets[static_cast<std::size_t>(i)].name, selected)) {
+			texture_set = i;
+		}
+		if (selected) {
+			ImGui::SetItemDefaultFocus();
+		}
+	}
+	ImGui::EndCombo();
+}
+
 void drawObjectsSection(scene::State& state) {
-	if (!ImGui::CollapsingHeader("Objects & materials")) {
+	if (!ImGui::CollapsingHeader("Objects & materials", ImGuiTreeNodeFlags_DefaultOpen)) {
 		return;
 	}
 	for (std::size_t i = 0; i < state.objects.size(); ++i) {
 		scene::Object& object = state.objects[i];
+		scene::Material& material = object.material;
 		ImGui::PushID(static_cast<int>(i));
 		if (ImGui::TreeNode(object.name)) {
 			ImGui::DragFloat3("Position", &object.position.x, 0.05f);
 			ImGui::DragFloat3("Rotation", &object.rotation.x, 1.0f);
 			ImGui::DragFloat3("Scale", &object.scale.x, 0.02f, 0.05f, 20.0f);
 			ImGui::Checkbox("Spin", &object.spin);
+
+			ImGui::SeparatorText("Texture");
+			drawTextureSetCombo(object.texture_set);
+			ImGui::DragFloat2("UV scale", &object.uv_scale.x, 0.05f, 0.1f, 20.0f);
+			ImGui::Checkbox("Animated sampling", &object.animated_sampling);
+
 			ImGui::SeparatorText("Material");
-			ImGui::ColorEdit3("Albedo", &object.material.albedo.x);
-			ImGui::ColorEdit3("Specular color", &object.material.specular.x);
-			ImGui::SliderFloat("Shininess", &object.material.shininess, 1.0f, 256.0f, "%.0f",
+			ImGui::ColorEdit3("Albedo tint", &material.albedo_tint.x);
+			ImGui::ColorEdit3("Specular color", &material.specular.x);
+			ImGui::SliderFloat("Shininess", &material.shininess, 1.0f, 256.0f, "%.0f",
 			                   ImGuiSliderFlags_Logarithmic);
+			ImGui::SliderFloat("Emissive strength", &material.emissive_strength, 0.0f, 5.0f);
 			ImGui::TreePop();
 		}
 		ImGui::PopID();
@@ -180,7 +199,7 @@ void handleCameraInput(scene::State& state, float delta_time) {
 
 void drawControlPanel(scene::State& state) {
 	ImGui::SetNextWindowSize({ 380.0f, 600.0f }, ImGuiCond_FirstUseEver);
-	ImGui::Begin("Lab 2 - Camera & Lighting");
+	ImGui::Begin("Lab 3 - Texturing");
 	ImGui::Text("%.1f FPS", ImGui::GetIO().Framerate);
 	drawCameraSection(state);
 	drawGlobalLightSection(state);

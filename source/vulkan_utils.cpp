@@ -54,6 +54,39 @@ bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer& buffer) {
 	return true;
 }
 
+bool createDeviceLocalBuffer(const void* data, VkDeviceSize size, VkBufferUsageFlags usage, Buffer& buffer) {
+	Buffer staging;
+	if (!createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging)) {
+		std::cerr << "Failed to create staging buffer\n";
+		return false;
+	}
+	writeBuffer(staging, data, size);
+
+	const VkBufferCreateInfo buffer_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size = size,
+		.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+	const VmaAllocationCreateInfo allocation_info = {
+		.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+	};
+	bool success = vmaCreateBuffer(graphics::internal::context.allocator, &buffer_info, &allocation_info,
+	                               &buffer.handle, &buffer.allocation, nullptr) == VK_SUCCESS;
+	if (success) {
+		buffer.size = size;
+		success = submitImmediate([&](VkCommandBuffer cmd) {
+			const VkBufferCopy region = { .srcOffset = 0, .dstOffset = 0, .size = size };
+			vkCmdCopyBuffer(cmd, staging.handle, buffer.handle, 1, &region);
+		});
+	}
+	if (!success) {
+		std::cerr << "Failed to create device local buffer\n";
+	}
+	destroyBuffer(staging);
+	return success;
+}
+
 void destroyBuffer(Buffer& buffer) {
 	if (buffer.handle != VK_NULL_HANDLE) {
 		vmaDestroyBuffer(graphics::internal::context.allocator, buffer.handle, buffer.allocation);
@@ -66,7 +99,6 @@ void writeBuffer(Buffer& buffer, const void* data, VkDeviceSize size) {
 		return;
 	}
 	std::memcpy(buffer.mapped, data, static_cast<std::size_t>(size));
-	// Память может быть не HOST_COHERENT, поэтому явно сбрасываем кэш.
 	vmaFlushAllocation(graphics::internal::context.allocator, buffer.allocation, 0, size);
 }
 
@@ -79,11 +111,56 @@ bool growBufferIfNeeded(Buffer& buffer, VkDeviceSize required_size, VkBufferUsag
 		std::cerr << "Failed to grow buffer to " << required_size << " bytes\n";
 		return false;
 	}
-	// Старый буфер мог использоваться предыдущим кадром - дожидаемся GPU.
 	vkDeviceWaitIdle(graphics::internal::context.device);
 	destroyBuffer(buffer);
 	buffer = bigger;
 	return true;
+}
+
+bool submitImmediate(const std::function<void(VkCommandBuffer)>& record) {
+	auto& context = graphics::internal::context;
+
+	const VkCommandPoolCreateInfo pool_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+		.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+		.queueFamilyIndex = context.graphics_queue_index,
+	};
+	VkCommandPool pool = VK_NULL_HANDLE;
+	if (vkCreateCommandPool(context.device, &pool_info, nullptr, &pool) != VK_SUCCESS) {
+		std::cerr << "Failed to create command pool for upload\n";
+		return false;
+	}
+
+	const VkCommandBufferAllocateInfo allocate_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.commandPool = pool,
+		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		.commandBufferCount = 1,
+	};
+	VkCommandBuffer cmd = VK_NULL_HANDLE;
+	bool success = vkAllocateCommandBuffers(context.device, &allocate_info, &cmd) == VK_SUCCESS;
+	if (success) {
+		const VkCommandBufferBeginInfo begin_info = {
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+		};
+		vkBeginCommandBuffer(cmd, &begin_info);
+		record(cmd);
+		vkEndCommandBuffer(cmd);
+
+		const VkSubmitInfo submit = {
+			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+			.commandBufferCount = 1,
+			.pCommandBuffers = &cmd,
+		};
+		success = vkQueueSubmit(context.graphics_queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS &&
+		          vkQueueWaitIdle(context.graphics_queue) == VK_SUCCESS;
+	}
+	if (!success) {
+		std::cerr << "Failed to submit upload commands\n";
+	}
+	vkDestroyCommandPool(context.device, pool, nullptr);
+	return success;
 }
 
 VkShaderModule createShaderModule(const char* filename) {
@@ -119,11 +196,11 @@ VkDescriptorSetLayout createSetLayout(std::span<const VkDescriptorSetLayoutBindi
 }
 
 void writeBufferDescriptor(VkDescriptorSet set, std::uint32_t binding, VkDescriptorType type,
-                           const Buffer& buffer) {
+                           const Buffer& buffer, VkDeviceSize range) {
 	const VkDescriptorBufferInfo buffer_info = {
 		.buffer = buffer.handle,
 		.offset = 0,
-		.range = VK_WHOLE_SIZE,
+		.range = range,
 	};
 	const VkWriteDescriptorSet write = {
 		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -132,6 +209,23 @@ void writeBufferDescriptor(VkDescriptorSet set, std::uint32_t binding, VkDescrip
 		.descriptorCount = 1,
 		.descriptorType = type,
 		.pBufferInfo = &buffer_info,
+	};
+	vkUpdateDescriptorSets(graphics::internal::context.device, 1, &write, 0, nullptr);
+}
+
+void writeImageDescriptor(VkDescriptorSet set, std::uint32_t binding, VkImageView view, VkSampler sampler) {
+	const VkDescriptorImageInfo image_info = {
+		.sampler = sampler,
+		.imageView = view,
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+	const VkWriteDescriptorSet write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = set,
+		.dstBinding = binding,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.pImageInfo = &image_info,
 	};
 	vkUpdateDescriptorSets(graphics::internal::context.device, 1, &write, 0, nullptr);
 }
@@ -168,8 +262,6 @@ VkPipeline createPipeline(const PipelineDescription& description) {
 		.viewportCount = 1,
 		.scissorCount = 1,
 	};
-	// Проекция уже переворачивает ось Y, поэтому лицевые грани остаются
-	// против часовой стрелки и задние грани можно отсекать.
 	const VkPipelineRasterizationStateCreateInfo rasterization = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
 		.polygonMode = VK_POLYGON_MODE_FILL,

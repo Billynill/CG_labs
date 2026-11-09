@@ -7,14 +7,36 @@
 #include "camera.hpp"
 #include "math.hpp"
 
-// Описание сцены в удобном для редактирования виде (то, что меняется в ImGui).
-// Здесь нет ничего про Vulkan - только данные и расчёт трансформаций.
 namespace scene {
 
+struct TextureSetFiles {
+	const char* name;
+	const char* albedo;
+	const char* specular;
+	const char* emissive;
+};
+
+inline constexpr std::array<TextureSetFiles, 5> texture_sets = {{
+	{ "Bricks", "textures/bricks_albedo.png", "textures/bricks_specular.png", nullptr },
+	{ "Tiles", "textures/tiles_albedo.png", "textures/tiles_specular.png", nullptr },
+	{ "Lava rock", "textures/lava_albedo.png", "textures/lava_specular.png", "textures/lava_emissive.png" },
+	{ "Sci-fi panel", "textures/scifi_albedo.png", "textures/scifi_specular.png", "textures/scifi_emissive.png" },
+	{ "Checker", "textures/checker_albedo.png", nullptr, nullptr },
+}};
+
+enum TextureSetIndex : int {
+	bricks_textures = 0,
+	tiles_textures,
+	lava_textures,
+	scifi_textures,
+	checker_textures,
+};
+
 struct Material {
-	math::Vec3 albedo = { 0.8f, 0.8f, 0.8f };
+	math::Vec3 albedo_tint = { 1.0f, 1.0f, 1.0f };
 	math::Vec3 specular = { 1.0f, 1.0f, 1.0f };
 	float shininess = 32.0f;
+	float emissive_strength = 1.0f;
 };
 
 struct Object {
@@ -22,21 +44,24 @@ struct Object {
 	math::Vec3 position;
 	math::Vec3 rotation; // градусы
 	math::Vec3 scale = { 1.0f, 1.0f, 1.0f };
+	int texture_set = bricks_textures;
+	math::Vec2 uv_scale = { 1.0f, 1.0f };
 	Material material;
-	bool spin = false; // вращать вокруг оси Y со временем
+	bool spin = false;
+	bool animated_sampling = false;
 };
 
 struct DirectionalLight {
 	math::Vec3 direction = { -0.4f, -1.0f, -0.3f };
 	math::Vec3 color = { 1.0f, 0.95f, 0.85f };
-	float intensity = 0.25f;
+	float intensity = 0.15f;
 };
 
 struct PointLight {
 	math::Vec3 position;
 	math::Vec3 color = { 1.0f, 1.0f, 1.0f };
 	float intensity = 3.0f;
-	bool orbit = false; // вращать вокруг вертикальной оси сцены
+	bool orbit = false;
 };
 
 struct SpotLight {
@@ -44,12 +69,12 @@ struct SpotLight {
 	math::Vec3 direction = { 0.0f, -1.0f, 0.0f };
 	math::Vec3 color = { 1.0f, 1.0f, 1.0f };
 	float intensity = 8.0f;
-	float inner_angle = 15.0f; // градусы, полный свет внутри этого угла
-	float outer_angle = 25.0f; // градусы, за этим углом света нет
-	bool attach_to_camera = false; // режим "фонарика"
+	float inner_angle = 15.0f;
+	float outer_angle = 25.0f;
+	bool attach_to_camera = false;
 };
 
-inline constexpr std::size_t object_count = 4;
+inline constexpr std::size_t object_count = 5;
 
 struct State {
 	Camera camera;
@@ -57,26 +82,23 @@ struct State {
 	float mouse_sensitivity = 0.15f; // градусов на пиксель
 
 	math::Vec3 ambient_color = { 0.6f, 0.7f, 1.0f };
-	float ambient_intensity = 0.08f;
+	float ambient_intensity = 0.05f;
 	DirectionalLight directional_light;
 	std::vector<PointLight> point_lights;
 	std::vector<SpotLight> spot_lights;
 	std::array<Object, object_count> objects;
 
 	bool animation_enabled = true;
-	float animation_time = 0.0f; // секунды, идёт только при включённой анимации
+	float animation_time = 0.0f;
 
 	bool show_light_gizmos = true;
 	bool show_spot_cones = true;
 };
 
-// Начальная сцена: пол, стена, два куба и несколько источников.
 State createDefaultState();
 
-// Итоговая позиция точечного источника с учётом анимации.
 math::Vec3 pointLightPosition(const PointLight& light, float time);
 
-// Позиция и направление прожектора с учётом режима "фонарик".
 struct SpotTransform {
 	math::Vec3 position;
 	math::Vec3 direction;

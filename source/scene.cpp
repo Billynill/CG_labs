@@ -46,27 +46,42 @@ State createDefaultState() {
 			.name = "Floor",
 			.position = { 0.0f, -0.55f, 0.0f },
 			.scale = { 14.0f, 0.1f, 14.0f },
-			.material = { .albedo = { 0.55f, 0.55f, 0.6f }, .specular = { 0.2f, 0.2f, 0.2f }, .shininess = 8.0f },
+			.texture_set = tiles_textures,
+			.uv_scale = { 7.0f, 7.0f },
+			.material = { .shininess = 64.0f },
 		},
 		{
 			.name = "Back wall",
 			.position = { 0.0f, 2.0f, -4.0f },
 			.scale = { 14.0f, 5.0f, 0.1f },
-			.material = { .albedo = { 0.6f, 0.5f, 0.45f }, .specular = { 0.1f, 0.1f, 0.1f }, .shininess = 4.0f },
+			.texture_set = bricks_textures,
+			.uv_scale = { 7.0f, 2.5f },
+			.material = { .shininess = 16.0f },
 		},
 		{
-			.name = "Red cube",
-			.position = { -1.2f, 0.0f, 0.0f },
+			.name = "Lava cube",
+			.position = { -1.4f, 0.0f, 0.0f },
 			.rotation = { 0.0f, 25.0f, 0.0f },
-			.material = { .albedo = { 0.85f, 0.2f, 0.2f }, .specular = { 1.0f, 1.0f, 1.0f }, .shininess = 64.0f },
+			.texture_set = lava_textures,
+			.material = { .specular = { 1.0f, 0.8f, 0.6f }, .shininess = 32.0f, .emissive_strength = 1.5f },
 		},
 		{
-			.name = "Gold cube",
-			.position = { 1.2f, 0.25f, 0.0f },
-			.rotation = { 20.0f, -30.0f, 10.0f },
+			.name = "Sci-fi pillar",
+			.position = { 1.4f, 0.25f, -0.3f },
+			.rotation = { 0.0f, -30.0f, 0.0f },
 			.scale = { 0.8f, 1.5f, 0.8f },
-			.material = { .albedo = { 0.9f, 0.7f, 0.25f }, .specular = { 1.0f, 0.85f, 0.5f }, .shininess = 128.0f },
+			.texture_set = scifi_textures,
+			.uv_scale = { 1.0f, 2.0f },
+			.material = { .shininess = 128.0f },
 			.spin = true,
+		},
+		{
+			.name = "Magic cube",
+			.position = { 0.0f, -0.1f, 1.3f },
+			.rotation = { 0.0f, 15.0f, 0.0f },
+			.scale = { 0.8f, 0.8f, 0.8f },
+			.texture_set = checker_textures,
+			.animated_sampling = true,
 		},
 	}};
 
@@ -79,7 +94,6 @@ math::Vec3 pointLightPosition(const PointLight& light, float time) {
 
 SpotTransform spotLightTransform(const SpotLight& light, const Camera& camera) {
 	if (light.attach_to_camera) {
-		// Чуть ниже камеры, как фонарик в руке.
 		return { camera.position + math::Vec3{ 0.0f, -0.15f, 0.0f }, camera.forward() };
 	}
 	return { light.position, math::normalize(light.direction) };
@@ -89,9 +103,6 @@ math::Mat4 modelMatrix(const Object& object, float time) {
 	return math::translation(object.position) * objectRotation(object, time) * math::scale(object.scale);
 }
 
-// Для M = T * R * S матрица нормалей (M^-1)^T равна R * S^-1:
-// перенос на нормали не влияет, а поворот ортогонален. Это дешевле
-// и понятнее, чем считать полную обратную матрицу.
 math::Mat4 normalMatrix(const Object& object, float time) {
 	const math::Vec3 inverse_scale = { 1.0f / object.scale.x, 1.0f / object.scale.y, 1.0f / object.scale.z };
 	return objectRotation(object, time) * math::scale(inverse_scale);

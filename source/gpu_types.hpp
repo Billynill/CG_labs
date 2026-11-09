@@ -4,9 +4,6 @@
 
 #include "math.hpp"
 
-// Структуры, которые копируются в буферы GPU. Раскладка полей должна
-// совпадать с шейдерами (std140 для uniform, std430 для storage буферов),
-// поэтому размеры проверяются через static_assert.
 namespace gpu {
 
 struct SceneData {
@@ -24,10 +21,20 @@ static_assert(sizeof(SceneData) == 144);
 struct ModelData {
 	math::Mat4 model;
 	math::Mat4 normal_matrix;
-	math::Vec4 albedo;
-	math::Vec4 specular; // rgb - цвет блика, w - коэффициент блеска
+	math::Vec4 albedo_tint; // rgb - множитель для текстуры альбедо
+	math::Vec4 specular;    // rgb - цвет блика, w - коэффициент блеска
+	math::Vec2 uv_scale;
+	float emissive_strength;
+	float _padding;
 };
-static_assert(sizeof(ModelData) == 160);
+static_assert(sizeof(ModelData) == 176);
+
+struct SamplingPushConstants {
+	std::uint32_t flags;
+	float time;
+};
+
+constexpr std::uint32_t sampling_flag_animated = 1u << 0;
 
 struct PointLight {
 	math::Vec3 position;
@@ -47,7 +54,6 @@ struct SpotLight {
 };
 static_assert(sizeof(SpotLight) == 48);
 
-// Push constants для отрисовки визуализации источников (без освещения).
 struct UnlitPushConstants {
 	math::Mat4 mvp;
 	math::Vec4 color;

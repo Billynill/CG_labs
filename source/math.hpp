@@ -2,8 +2,6 @@
 
 #include <cmath>
 
-// Минимальная математика для лабораторной: векторы и матрицы 4x4.
-// Матрицы хранятся по столбцам (column-major), как ожидает GLSL.
 namespace math {
 
 constexpr float pi = 3.14159265358979f;
@@ -16,7 +14,11 @@ struct Vec3 {
 	float z = 0.0f;
 };
 
-// Используется в структурах для GPU, где поля выравниваются по 16 байт.
+struct Vec2 {
+	float x = 0.0f;
+	float y = 0.0f;
+};
+
 struct Vec4 {
 	float x = 0.0f;
 	float y = 0.0f;
@@ -42,13 +44,11 @@ inline Vec3 cross(Vec3 a, Vec3 b) {
 
 inline float length(Vec3 v) { return std::sqrt(dot(v, v)); }
 
-// Если вектор нулевой, возвращаем запасное направление, чтобы не делить на ноль.
 inline Vec3 normalize(Vec3 v, Vec3 fallback = { 0.0f, -1.0f, 0.0f }) {
 	const float len = length(v);
 	return len > 1e-6f ? v * (1.0f / len) : fallback;
 }
 
-// Ортогональный к v единичный вектор (нужен для построения конуса прожектора).
 inline Vec3 anyPerpendicular(Vec3 v) {
 	const Vec3 helper = std::fabs(v.y) < 0.99f ? Vec3{ 0.0f, 1.0f, 0.0f } : Vec3{ 1.0f, 0.0f, 0.0f };
 	return normalize(cross(v, helper));
@@ -121,12 +121,10 @@ inline Mat4 rotationZ(float angle) {
 	return result;
 }
 
-// Углы в градусах, порядок применения: сначала X, потом Y, потом Z.
 inline Mat4 rotationXYZ(Vec3 degrees) {
 	return rotationZ(radians(degrees.z)) * rotationY(radians(degrees.y)) * rotationX(radians(degrees.x));
 }
 
-// Правосторонняя система координат: камера смотрит вдоль -Z в пространстве вида.
 inline Mat4 lookAt(Vec3 eye, Vec3 target, Vec3 up) {
 	const Vec3 forward = normalize(target - eye, { 0.0f, 0.0f, -1.0f });
 	const Vec3 right = normalize(cross(forward, up), { 1.0f, 0.0f, 0.0f });
@@ -142,7 +140,6 @@ inline Mat4 lookAt(Vec3 eye, Vec3 target, Vec3 up) {
 	return result;
 }
 
-// Перспектива под Vulkan: глубина в [0, 1], ось Y экрана направлена вниз, поэтому -f.
 inline Mat4 perspective(float fov_y, float aspect, float near_plane, float far_plane) {
 	const float f = 1.0f / std::tan(fov_y * 0.5f);
 	Mat4 result;

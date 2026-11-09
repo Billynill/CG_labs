@@ -1,6 +1,5 @@
 #version 450
 
-// Шейдер для визуализации источников света: без освещения, один цвет.
 layout(location = 0) in vec3 inPosition;
 
 layout(push_constant) uniform PushConstants {

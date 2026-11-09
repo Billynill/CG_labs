@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -11,6 +12,7 @@ namespace cube {
 struct Vertex {
 	math::Vec3 position;
 	math::Vec3 normal;
+	math::Vec2 uv;
 };
 
 struct Mesh {
@@ -18,9 +20,6 @@ struct Mesh {
 	std::vector<std::uint32_t> indices;
 };
 
-// Нормали генерируются процедурно: для каждой грани берём векторное
-// произведение двух её рёбер. Угол куба принадлежит трём граням с разными
-// нормалями, поэтому вершины дублируются: 6 граней * 4 вершины = 24 вершины.
 inline Mesh createMesh() {
 	const std::array<math::Vec3, 8> corners = {{
 		{ -0.5f, -0.5f, -0.5f }, {  0.5f, -0.5f, -0.5f },
@@ -29,8 +28,6 @@ inline Mesh createMesh() {
 		{  0.5f,  0.5f,  0.5f }, { -0.5f,  0.5f,  0.5f },
 	}};
 
-	// Вершины каждой грани перечислены против часовой стрелки,
-	// если смотреть на грань снаружи, поэтому нормаль смотрит наружу.
 	const std::array<std::array<std::uint32_t, 4>, 6> faces = {{
 		{{ 0, 3, 2, 1 }}, // задняя  (-Z)
 		{{ 4, 5, 6, 7 }}, // передняя (+Z)
@@ -47,11 +44,19 @@ inline Mesh createMesh() {
 		const math::Vec3 c = corners[face[2]];
 		const math::Vec3 normal = math::normalize(math::cross(b - a, c - a));
 
+		const math::Vec3 face_up = std::fabs(normal.y) > 0.5f ? math::Vec3{ 0.0f, 0.0f, -normal.y }
+		                                                      : math::Vec3{ 0.0f, 1.0f, 0.0f };
+		const math::Vec3 face_right = math::cross(face_up, normal);
+
 		const auto first = static_cast<std::uint32_t>(mesh.vertices.size());
 		for (std::uint32_t corner : face) {
-			mesh.vertices.push_back({ corners[corner], normal });
+			const math::Vec3 position = corners[corner];
+			const math::Vec2 uv = {
+				math::dot(position, face_right) + 0.5f,
+				0.5f - math::dot(position, face_up),
+			};
+			mesh.vertices.push_back({ position, normal, uv });
 		}
-		// Две треугольные половинки квадратной грани.
 		mesh.indices.insert(mesh.indices.end(), {
 			first, first + 1, first + 2,
 			first + 2, first + 3, first,

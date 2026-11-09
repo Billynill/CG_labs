@@ -8,6 +8,7 @@ add_executable(${PROJECT_NAME}
 	source/graphics_internal.cpp
 	source/application.cpp
 	source/scene.cpp
+	source/texture.cpp
 	source/ui.cpp
 	source/vulkan_utils.cpp
 )
@@ -55,6 +56,12 @@ FetchContent_Declare(
 	GIT_TAG v1.92.9
 )
 
+FetchContent_Declare(
+	stb
+	GIT_REPOSITORY https://github.com/nothings/stb.git
+	GIT_TAG d14d46f6b44456eb88beac58cba833a4135d4c89
+)
+
 find_package(Vulkan REQUIRED)
 
 set(GLFW_LIBRARY_TYPE STATIC)
@@ -67,6 +74,7 @@ FetchContent_MakeAvailable(
 	vk-bootstrap
 	VulkanMemoryAllocator
 	imgui
+	stb
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -77,6 +85,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_sources(${PROJECT_NAME} PRIVATE
 	${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
 	${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp

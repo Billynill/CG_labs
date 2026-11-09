@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <iostream>
 #include <iterator>
 #include <vector>
@@ -12,74 +13,86 @@
 #include "gpu_types.hpp"
 #include "math.hpp"
 #include "scene.hpp"
+#include "texture.hpp"
 #include "ui.hpp"
 #include "vulkan_utils.hpp"
 
 namespace {
 
 using math::Vec3;
-using vulkan_utils::Buffer;
 using scene::object_count;
+using vulkan_utils::Buffer;
+using vulkan_utils::Texture;
+
+constexpr std::size_t texture_set_count = scene::texture_sets.size();
 
 constexpr VkBufferUsageFlags storage_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 constexpr VkShaderStageFlags vertex_and_fragment = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-// Привязки набора дескрипторов сцены (set 0), должны совпадать с lit.frag.
 constexpr std::uint32_t scene_data_binding = 0;
 constexpr std::uint32_t point_lights_binding = 1;
 constexpr std::uint32_t spot_lights_binding = 2;
 
+constexpr std::uint32_t model_data_binding = 0;
+constexpr std::uint32_t albedo_map_binding = 1;
+constexpr std::uint32_t specular_map_binding = 2;
+constexpr std::uint32_t emissive_map_binding = 3;
+
 scene::State state = scene::createDefaultState();
 double previous_time = 0.0;
 
-// --- Геометрия ---
-cube::Mesh cube_mesh; // используется и для объектов сцены, и для визуализации источников
+cube::Mesh cube_mesh;
 Buffer vertex_buffer;
 Buffer index_buffer;
-Buffer line_vertex_buffer; // каркасы конусов прожекторов, пересобираются каждый кадр
+Buffer line_vertex_buffer;
 std::uint32_t line_vertex_count = 0;
 
-// --- Данные для шейдеров ---
 Buffer scene_uniform_buffer;
 Buffer point_light_buffer;
 Buffer spot_light_buffer;
-std::array<Buffer, object_count> model_uniform_buffers;
+Buffer model_data_buffer;
+VkDeviceSize model_data_stride = 0;
 
-// --- Дескрипторы ---
-// set 0 (сцена): uniform с параметрами сцены + storage буферы источников;
-// set 1 (модель): uniform с матрицей модели и материалом.
+struct TextureSet {
+	Texture albedo;
+	Texture specular;
+	Texture emissive;
+	VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+};
+std::array<TextureSet, texture_set_count> texture_sets;
+Texture black_texture;
+VkSampler sampler = VK_NULL_HANDLE;
+
 VkDescriptorSetLayout scene_set_layout = VK_NULL_HANDLE;
-VkDescriptorSetLayout model_set_layout = VK_NULL_HANDLE;
+VkDescriptorSetLayout material_set_layout = VK_NULL_HANDLE;
 VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 VkDescriptorSet scene_set = VK_NULL_HANDLE;
-std::array<VkDescriptorSet, object_count> model_sets{};
 
-// --- Пайплайны ---
 VkPipelineLayout lit_pipeline_layout = VK_NULL_HANDLE;
 VkPipelineLayout unlit_pipeline_layout = VK_NULL_HANDLE;
-VkPipeline lit_pipeline = VK_NULL_HANDLE;        // объекты сцены с освещением
-VkPipeline unlit_pipeline = VK_NULL_HANDLE;      // кубики-источники
-VkPipeline unlit_line_pipeline = VK_NULL_HANDLE; // конусы прожекторов
-
-// ===========================================================================
-// Создание и удаление ресурсов
-// ===========================================================================
+VkPipeline lit_pipeline = VK_NULL_HANDLE;
+VkPipeline unlit_pipeline = VK_NULL_HANDLE;
+VkPipeline unlit_line_pipeline = VK_NULL_HANDLE;
 
 bool createBuffers() {
-	cube_mesh = cube::createMesh();
-	const VkDeviceSize vertices_size = cube_mesh.vertices.size() * sizeof(cube::Vertex);
-	const VkDeviceSize indices_size = cube_mesh.indices.size() * sizeof(std::uint32_t);
+	auto& context = graphics::internal::context;
 
-	if (!vulkan_utils::createBuffer(vertices_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_buffer) ||
-	    !vulkan_utils::createBuffer(indices_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, index_buffer)) {
+	cube_mesh = cube::createMesh();
+	if (!vulkan_utils::createDeviceLocalBuffer(cube_mesh.vertices.data(),
+	                                           cube_mesh.vertices.size() * sizeof(cube::Vertex),
+	                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_buffer) ||
+	    !vulkan_utils::createDeviceLocalBuffer(cube_mesh.indices.data(),
+	                                           cube_mesh.indices.size() * sizeof(std::uint32_t),
+	                                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, index_buffer)) {
 		std::cerr << "Failed to create geometry buffers\n";
 		return false;
 	}
-	vulkan_utils::writeBuffer(vertex_buffer, cube_mesh.vertices.data(), vertices_size);
-	vulkan_utils::writeBuffer(index_buffer, cube_mesh.indices.data(), indices_size);
 
-	// Начальная ёмкость - 16 источников каждого типа, дальше буферы растут сами.
-	// Буфер нулевого размера создавать нельзя, поэтому ёмкость всегда > 0.
+	VkPhysicalDeviceProperties properties{};
+	vkGetPhysicalDeviceProperties(context.physical_device, &properties);
+	model_data_stride = vulkan_utils::alignUp(sizeof(gpu::ModelData),
+	                                          properties.limits.minUniformBufferOffsetAlignment);
+
 	constexpr VkDeviceSize initial_light_capacity = 16;
 	constexpr VkDeviceSize initial_line_vertices = 64;
 	if (!vulkan_utils::createBuffer(sizeof(gpu::SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -88,19 +101,46 @@ bool createBuffers() {
 	                                point_light_buffer) ||
 	    !vulkan_utils::createBuffer(initial_light_capacity * sizeof(gpu::SpotLight), storage_usage,
 	                                spot_light_buffer) ||
+	    !vulkan_utils::createBuffer(model_data_stride * object_count, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+	                                model_data_buffer) ||
 	    !vulkan_utils::createBuffer(initial_line_vertices * sizeof(cube::Vertex),
 	                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, line_vertex_buffer)) {
 		std::cerr << "Failed to create scene buffers\n";
 		return false;
 	}
+	return true;
+}
 
-	for (Buffer& buffer : model_uniform_buffers) {
-		if (!vulkan_utils::createBuffer(sizeof(gpu::ModelData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, buffer)) {
-			std::cerr << "Failed to create model uniform buffer\n";
+bool loadOptionalTexture(const char* filename, vulkan_utils::TextureEncoding encoding, Texture& texture) {
+	return filename == nullptr || vulkan_utils::loadTexture(filename, encoding, texture);
+}
+
+bool loadTextures() {
+	using vulkan_utils::TextureEncoding;
+
+	if (!vulkan_utils::createSolidColorTexture({ 0, 0, 0, 255 }, black_texture)) {
+		return false;
+	}
+	sampler = vulkan_utils::createRepeatSampler();
+	if (sampler == VK_NULL_HANDLE) {
+		return false;
+	}
+
+	for (std::size_t i = 0; i < texture_set_count; ++i) {
+		const scene::TextureSetFiles& files = scene::texture_sets[i];
+		TextureSet& set = texture_sets[i];
+		if (!vulkan_utils::loadTexture(files.albedo, TextureEncoding::srgb, set.albedo) ||
+		    !loadOptionalTexture(files.specular, TextureEncoding::linear, set.specular) ||
+		    !loadOptionalTexture(files.emissive, TextureEncoding::srgb, set.emissive)) {
+			std::cerr << "Failed to load textures for material \"" << files.name << "\"\n";
 			return false;
 		}
 	}
 	return true;
+}
+
+VkImageView viewOrBlack(const Texture& texture) {
+	return texture.view != VK_NULL_HANDLE ? texture.view : black_texture.view;
 }
 
 bool createDescriptors() {
@@ -114,23 +154,31 @@ bool createDescriptors() {
 		{ .binding = spot_lights_binding, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 		  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
 	};
-	const VkDescriptorSetLayoutBinding model_bindings[] = {
-		{ .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+	const VkDescriptorSetLayoutBinding material_bindings[] = {
+		{ .binding = model_data_binding, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 		  .descriptorCount = 1, .stageFlags = vertex_and_fragment },
+		{ .binding = albedo_map_binding, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = specular_map_binding, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+		{ .binding = emissive_map_binding, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		  .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
 	};
 	scene_set_layout = vulkan_utils::createSetLayout(scene_bindings);
-	model_set_layout = vulkan_utils::createSetLayout(model_bindings);
-	if (scene_set_layout == VK_NULL_HANDLE || model_set_layout == VK_NULL_HANDLE) {
+	material_set_layout = vulkan_utils::createSetLayout(material_bindings);
+	if (scene_set_layout == VK_NULL_HANDLE || material_set_layout == VK_NULL_HANDLE) {
 		return false;
 	}
 
 	const VkDescriptorPoolSize pool_sizes[] = {
-		{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1 + object_count },
+		{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1 },
 		{ .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2 },
+		{ .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = texture_set_count },
+		{ .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 3 * texture_set_count },
 	};
 	const VkDescriptorPoolCreateInfo pool_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1 + object_count,
+		.maxSets = 1 + texture_set_count,
 		.poolSizeCount = static_cast<std::uint32_t>(std::size(pool_sizes)),
 		.pPoolSizes = pool_sizes,
 	};
@@ -156,17 +204,20 @@ bool createDescriptors() {
 	vulkan_utils::writeBufferDescriptor(scene_set, spot_lights_binding,
 	                                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, spot_light_buffer);
 
-	std::array<VkDescriptorSetLayout, object_count> model_layouts;
-	model_layouts.fill(model_set_layout);
-	allocate_info.descriptorSetCount = static_cast<std::uint32_t>(object_count);
-	allocate_info.pSetLayouts = model_layouts.data();
-	if (vkAllocateDescriptorSets(context.device, &allocate_info, model_sets.data()) != VK_SUCCESS) {
-		std::cerr << "Failed to allocate model descriptor sets\n";
-		return false;
-	}
-	for (std::size_t i = 0; i < object_count; ++i) {
-		vulkan_utils::writeBufferDescriptor(model_sets[i], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		                                    model_uniform_buffers[i]);
+	allocate_info.pSetLayouts = &material_set_layout;
+	for (TextureSet& set : texture_sets) {
+		if (vkAllocateDescriptorSets(context.device, &allocate_info, &set.descriptor_set) != VK_SUCCESS) {
+			std::cerr << "Failed to allocate material descriptor set\n";
+			return false;
+		}
+		vulkan_utils::writeBufferDescriptor(set.descriptor_set, model_data_binding,
+		                                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, model_data_buffer,
+		                                    sizeof(gpu::ModelData));
+		vulkan_utils::writeImageDescriptor(set.descriptor_set, albedo_map_binding, set.albedo.view, sampler);
+		vulkan_utils::writeImageDescriptor(set.descriptor_set, specular_map_binding,
+		                                   viewOrBlack(set.specular), sampler);
+		vulkan_utils::writeImageDescriptor(set.descriptor_set, emissive_map_binding,
+		                                   viewOrBlack(set.emissive), sampler);
 	}
 	return true;
 }
@@ -174,15 +225,21 @@ bool createDescriptors() {
 bool createPipelineLayouts() {
 	auto& context = graphics::internal::context;
 
-	const VkDescriptorSetLayout lit_sets[] = { scene_set_layout, model_set_layout };
+	const VkPushConstantRange sampling_range = {
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.offset = 0,
+		.size = sizeof(gpu::SamplingPushConstants),
+	};
+	const VkDescriptorSetLayout lit_sets[] = { scene_set_layout, material_set_layout };
 	const VkPipelineLayoutCreateInfo lit_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.setLayoutCount = static_cast<std::uint32_t>(std::size(lit_sets)),
 		.pSetLayouts = lit_sets,
+		.pushConstantRangeCount = 1,
+		.pPushConstantRanges = &sampling_range,
 	};
 
-	// Визуализации источников хватает push constants: матрица и цвет.
-	const VkPushConstantRange push_range = {
+	const VkPushConstantRange unlit_range = {
 		.stageFlags = vertex_and_fragment,
 		.offset = 0,
 		.size = sizeof(gpu::UnlitPushConstants),
@@ -190,7 +247,7 @@ bool createPipelineLayouts() {
 	const VkPipelineLayoutCreateInfo unlit_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.pushConstantRangeCount = 1,
-		.pPushConstantRanges = &push_range,
+		.pPushConstantRanges = &unlit_range,
 	};
 
 	if (vkCreatePipelineLayout(context.device, &lit_info, nullptr, &lit_pipeline_layout) != VK_SUCCESS ||
@@ -208,15 +265,16 @@ bool createPipelines() {
 	const VkShaderModule unlit_vertex = vulkan_utils::createShaderModule("shaders/unlit.vert.spv");
 	const VkShaderModule unlit_fragment = vulkan_utils::createShaderModule("shaders/unlit.frag.spv");
 
-	// Освещённым объектам нужны позиция и нормаль, визуализации - только позиция.
 	const VkVertexInputAttributeDescription attributes[] = {
 		{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
 		  .offset = offsetof(cube::Vertex, position) },
 		{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
 		  .offset = offsetof(cube::Vertex, normal) },
+		{ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,
+		  .offset = offsetof(cube::Vertex, uv) },
 	};
-	const std::span<const VkVertexInputAttributeDescription> position_and_normal = attributes;
-	const auto position_only = position_and_normal.first(1);
+	const std::span<const VkVertexInputAttributeDescription> all_attributes = attributes;
+	const auto position_only = all_attributes.first(1);
 	constexpr auto stride = static_cast<std::uint32_t>(sizeof(cube::Vertex));
 
 	bool success = lit_vertex && lit_fragment && unlit_vertex && unlit_fragment;
@@ -226,7 +284,7 @@ bool createPipelines() {
 			.fragment_shader = lit_fragment,
 			.layout = lit_pipeline_layout,
 			.vertex_stride = stride,
-			.vertex_attributes = position_and_normal,
+			.vertex_attributes = all_attributes,
 		});
 		unlit_pipeline = vulkan_utils::createPipeline({
 			.vertex_shader = unlit_vertex,
@@ -246,8 +304,6 @@ bool createPipelines() {
 		success = lit_pipeline && unlit_pipeline && unlit_line_pipeline;
 	}
 
-	// После создания пайплайнов шейдерные модули больше не нужны.
-	// vkDestroyShaderModule безопасно вызывать и для VK_NULL_HANDLE.
 	for (VkShaderModule module : { lit_vertex, lit_fragment, unlit_vertex, unlit_fragment }) {
 		vkDestroyShaderModule(context.device, module, nullptr);
 	}
@@ -256,24 +312,30 @@ bool createPipelines() {
 
 void destroyResources() {
 	auto& context = graphics::internal::context;
-	// Все vkDestroy* допускают VK_NULL_HANDLE, поэтому функция безопасна
-	// и при частично выполненной инициализации.
 	vkDestroyPipeline(context.device, unlit_line_pipeline, nullptr);
 	vkDestroyPipeline(context.device, unlit_pipeline, nullptr);
 	vkDestroyPipeline(context.device, lit_pipeline, nullptr);
 	vkDestroyPipelineLayout(context.device, unlit_pipeline_layout, nullptr);
 	vkDestroyPipelineLayout(context.device, lit_pipeline_layout, nullptr);
-	vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr); // освобождает и сами наборы
-	vkDestroyDescriptorSetLayout(context.device, model_set_layout, nullptr);
+	vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr);
+	vkDestroyDescriptorSetLayout(context.device, material_set_layout, nullptr);
 	vkDestroyDescriptorSetLayout(context.device, scene_set_layout, nullptr);
 	unlit_line_pipeline = unlit_pipeline = lit_pipeline = VK_NULL_HANDLE;
 	unlit_pipeline_layout = lit_pipeline_layout = VK_NULL_HANDLE;
 	descriptor_pool = VK_NULL_HANDLE;
-	model_set_layout = scene_set_layout = VK_NULL_HANDLE;
+	material_set_layout = scene_set_layout = VK_NULL_HANDLE;
 
-	for (Buffer& buffer : model_uniform_buffers) {
-		vulkan_utils::destroyBuffer(buffer);
+	for (TextureSet& set : texture_sets) {
+		vulkan_utils::destroyTexture(set.emissive);
+		vulkan_utils::destroyTexture(set.specular);
+		vulkan_utils::destroyTexture(set.albedo);
+		set.descriptor_set = VK_NULL_HANDLE;
 	}
+	vulkan_utils::destroyTexture(black_texture);
+	vkDestroySampler(context.device, sampler, nullptr);
+	sampler = VK_NULL_HANDLE;
+
+	vulkan_utils::destroyBuffer(model_data_buffer);
 	vulkan_utils::destroyBuffer(spot_light_buffer);
 	vulkan_utils::destroyBuffer(point_light_buffer);
 	vulkan_utils::destroyBuffer(scene_uniform_buffer);
@@ -282,17 +344,11 @@ void destroyResources() {
 	vulkan_utils::destroyBuffer(vertex_buffer);
 }
 
-// ===========================================================================
-// Подготовка данных кадра (до записи команд)
-// ===========================================================================
-
 float aspectRatio() {
 	const VkExtent2D extent = graphics::internal::context.swapchain_extent;
 	return static_cast<float>(std::max(extent.width, 1u)) / static_cast<float>(std::max(extent.height, 1u));
 }
 
-// Копирует источники в storage буфер, при необходимости увеличивая его.
-// Возвращает, сколько источников реально записано (меньше, если буфер не удалось увеличить).
 template <typename GpuLight>
 std::uint32_t uploadLights(const std::vector<GpuLight>& lights, Buffer& buffer, std::uint32_t binding) {
 	const VkDeviceSize required = lights.size() * sizeof(GpuLight);
@@ -323,7 +379,6 @@ void uploadSceneData(const math::Mat4& view_projection) {
 			.position = transform.position,
 			.intensity = light.intensity,
 			.direction = transform.direction,
-			// В шейдере сравниваем косинусы - так не нужен acos для каждого пикселя.
 			.inner_cos = std::cos(math::radians(light.inner_angle)),
 			.color = light.color,
 			.outer_cos = std::cos(math::radians(light.outer_angle)),
@@ -340,20 +395,26 @@ void uploadSceneData(const math::Mat4& view_projection) {
 	data.point_light_count = uploadLights(point_lights, point_light_buffer, point_lights_binding);
 	data.spot_light_count = uploadLights(spot_lights, spot_light_buffer, spot_lights_binding);
 	vulkan_utils::writeBuffer(scene_uniform_buffer, &data, sizeof(data));
+}
 
+void uploadModelData() {
+	std::vector<std::byte> bytes(model_data_buffer.size);
 	for (std::size_t i = 0; i < object_count; ++i) {
 		const scene::Object& object = state.objects[i];
+		const scene::Material& material = object.material;
 		const gpu::ModelData model = {
 			.model = scene::modelMatrix(object, state.animation_time),
 			.normal_matrix = scene::normalMatrix(object, state.animation_time),
-			.albedo = math::toVec4(object.material.albedo, 1.0f),
-			.specular = math::toVec4(object.material.specular, object.material.shininess),
+			.albedo_tint = math::toVec4(material.albedo_tint, 1.0f),
+			.specular = math::toVec4(material.specular, material.shininess),
+			.uv_scale = object.uv_scale,
+			.emissive_strength = material.emissive_strength,
 		};
-		vulkan_utils::writeBuffer(model_uniform_buffers[i], &model, sizeof(model));
+		std::memcpy(bytes.data() + i * model_data_stride, &model, sizeof(model));
 	}
+	vulkan_utils::writeBuffer(model_data_buffer, bytes.data(), bytes.size());
 }
 
-// Каркас конуса прожектора: окружность на конце + образующие + ось.
 std::vector<cube::Vertex> buildSpotConeLines() {
 	constexpr int circle_segments = 32;
 	constexpr int side_lines = 8;
@@ -362,7 +423,7 @@ std::vector<cube::Vertex> buildSpotConeLines() {
 	std::vector<cube::Vertex> lines;
 	for (const auto& light : state.spot_lights) {
 		if (light.attach_to_camera) {
-			continue; // конус фонарика выходит из глаз камеры, рисовать его бессмысленно
+			continue;
 		}
 		const scene::SpotTransform transform = scene::spotLightTransform(light, state.camera);
 		const Vec3 apex = transform.position;
@@ -401,10 +462,6 @@ void uploadSpotConeLines() {
 	vulkan_utils::writeBuffer(line_vertex_buffer, lines.data(), written);
 	line_vertex_count = static_cast<std::uint32_t>(written / sizeof(cube::Vertex));
 }
-
-// ===========================================================================
-// Запись команд
-// ===========================================================================
 
 void beginRenderPass(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 	auto& context = graphics::internal::context;
@@ -451,12 +508,23 @@ void pushUnlitConstants(VkCommandBuffer cmd, const math::Mat4& mvp, Vec3 color) 
 
 void drawLitObjects(VkCommandBuffer cmd) {
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_pipeline);
-	// Набор сцены привязывается один раз, а набор модели - перед каждым объектом.
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_pipeline_layout,
 	                        0, 1, &scene_set, 0, nullptr);
-	for (VkDescriptorSet model_set : model_sets) {
+
+	for (std::size_t i = 0; i < object_count; ++i) {
+		const scene::Object& object = state.objects[i];
+		const auto texture_set = static_cast<std::size_t>(object.texture_set);
+
+		const auto dynamic_offset = static_cast<std::uint32_t>(i * model_data_stride);
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_pipeline_layout,
-		                        1, 1, &model_set, 0, nullptr);
+		                        1, 1, &texture_sets[texture_set].descriptor_set, 1, &dynamic_offset);
+
+		const gpu::SamplingPushConstants sampling = {
+			.flags = object.animated_sampling ? gpu::sampling_flag_animated : 0u,
+			.time = state.animation_time,
+		};
+		vkCmdPushConstants(cmd, lit_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+		                   0, sizeof(sampling), &sampling);
 		drawCube(cmd);
 	}
 }
@@ -473,7 +541,7 @@ void drawLightGizmos(VkCommandBuffer cmd, const math::Mat4& view_projection) {
 		drawGizmo(scene::pointLightPosition(light, state.animation_time), light.color);
 	}
 	for (const auto& light : state.spot_lights) {
-		if (!light.attach_to_camera) { // куб внутри камеры закрыл бы весь экран
+		if (!light.attach_to_camera) {
 			drawGizmo(light.position, light.color);
 		}
 	}
@@ -492,7 +560,8 @@ void drawSpotCones(VkCommandBuffer cmd, const math::Mat4& view_projection) {
 namespace application {
 
 bool initialize() {
-	if (!createBuffers() || !createDescriptors() || !createPipelineLayouts() || !createPipelines()) {
+	if (!createBuffers() || !loadTextures() || !createDescriptors() ||
+	    !createPipelineLayouts() || !createPipelines()) {
 		destroyResources();
 		return false;
 	}
@@ -508,7 +577,6 @@ void update(double time) {
 	if (previous_time == 0.0) {
 		previous_time = time;
 	}
-	// Ограничиваем шаг, чтобы после паузы (например, перетаскивания окна) ничего не "прыгало".
 	const float delta_time = static_cast<float>(std::min(time - previous_time, 0.1));
 	previous_time = time;
 	if (state.animation_enabled) {
@@ -520,10 +588,9 @@ void update(double time) {
 }
 
 void render(const graphics::internal::FrameData& fd) {
-	// prepare() уже дождался окончания предыдущего кадра, поэтому буферы
-	// можно перезаписывать. Все данные готовим до начала записи команд.
 	const math::Mat4 view_projection = state.camera.projection(aspectRatio()) * state.camera.view();
 	uploadSceneData(view_projection);
+	uploadModelData();
 	uploadSpotConeLines();
 
 	const VkCommandBuffer cmd = fd.command_buffer;
@@ -541,7 +608,7 @@ void render(const graphics::internal::FrameData& fd) {
 		drawLightGizmos(cmd, view_projection);
 	}
 	if (line_vertex_count > 0) {
-		drawSpotCones(cmd, view_projection); // перепривязывает vertex buffer, поэтому последним
+		drawSpotCones(cmd, view_projection);
 	}
 
 	vkCmdEndRenderPass(cmd);
